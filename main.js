@@ -7,9 +7,10 @@
 
 const NS = "http://www.w3.org/2000/svg";
 
-// まつ毛と瞳が作る外形の、この割合ぶんを「目の内側」とみなす。
-// 大きくすると頬まで巻き込み、小さくすると白目が取り残される。
-const EYE_INNER_RATIO = 0.42;
+// 目の領域の半幅・半高 (viewBox)。この矩形に描画範囲ごと収まるパーツを
+// 「その目のもの」とみなす。片目の幅はおよそ 50。
+const EYE_HALF_W = 27;
+const EYE_HALF_H = 23;
 
 // 口の縦スケールの下限と上限
 const MOUTH_CLOSED = 0.55;
@@ -113,51 +114,52 @@ function groupParts(svg, label) {
 // 左右の目は別々に動かしたいので、中心より左か右かで分ける
 function groupEyes(svg) {
   const all = window.OKOJO_SHAPES || [];
-  const nodes = [...svg.querySelectorAll('[data-label="eye"]')];
-  if (!nodes.length) return [];
-  const shapes = all.filter((s) => s.label === "eye");
-  const mid = shapes.reduce((a, s) => a + s.cx, 0) / shapes.length;
+  const eyes = all.filter((s) => s.label === "eye");
+  if (!eyes.length) return [];
 
-  const sides = [[], []];
-  for (const n of nodes) {
-    const s = shapes.find((x) => x.id === n.id);
-    if (s) sides[s.cx < mid ? 0 : 1].push([n, s]);
-  }
+  const median = (xs) => {
+    const v = [...xs].sort((a, b) => a - b);
+    return v[Math.floor(v.length / 2)];
+  };
+
+  // 左右に分けたうえで、それぞれの中心を中央値で決める。平均だと、判定に
+  // 紛れ込んだ外れ値ひとつで中心がずれる。
+  const mid = median(eyes.map((s) => s.cx));
+  const sides = [eyes.filter((s) => s.cx < mid), eyes.filter((s) => s.cx >= mid)];
 
   const byId = new Map(all.map((s) => [s.id, s]));
 
   return sides.filter((side) => side.length).map((side, i) => {
-    const g = el("g", { "data-part": "eye" + (i ? "R" : "L") });
-    side[side.length - 1][0].after(g);
-    for (const [n] of side) g.appendChild(n);
+    const cx = median(side.map((s) => s.cx));
+    const cy = median(side.map((s) => s.cy));
+    const x0 = cx - EYE_HALF_W, x1 = cx + EYE_HALF_W;
+    const y0 = cy - EYE_HALF_H, y1 = cy + EYE_HALF_H;
 
-    // ここまでに入っているのは暗いパーツ (まつ毛と瞳) だけ。白目は肌より
-    // 明るいので色では拾えず、置き去りにすると目を閉じたときに白い穴が残る。
-    // まつ毛と瞳が作る外形の内側にあるものを、明るさに関係なく取り込む。
-    // 頬はこの外形の下にあるので入らない。
-    const b = g.getBBox();
-    const cx = b.x + b.width / 2;
-    const cy = b.y + b.height / 2;
-    const rx = b.width * EYE_INNER_RATIO;
-    const ry = b.height * EYE_INNER_RATIO;
+    // 目の領域に「描画範囲ごと」収まるものだけを集める。重心で判定すると、
+    // 目の上を通り過ぎるだけの長い髪の線まで入り、グループの外形が顔ごと
+    // 覆う大きさに化ける。この条件なら白目もまつ毛も入り、通過する線は入らない。
+    const members = [];
     for (const s of all) {
-      if (s.label === "eye" || s.label === "mouth" || s.label === "ahoge") continue;
-      if (Math.abs(s.cx - cx) < rx && Math.abs(s.cy - cy) < ry) {
-        const n = svg.getElementById(s.id);
-        if (n && n.parentNode !== g) g.appendChild(n);
+      if (s.label === "mouth" || s.label === "ahoge") continue;
+      const n = svg.getElementById(s.id);
+      if (!n) continue;
+      const b = n.getBBox();
+      if (b.x >= x0 && b.x + b.width <= x1 && b.y >= y0 && b.y + b.height <= y1) {
+        members.push(n);
       }
     }
+    if (!members.length) return null;
 
+    const g = el("g", { "data-part": "eye" + (i ? "R" : "L") });
+    members[members.length - 1].after(g);
     // 取り込みで重なり順が崩れるので、解析時の depth で並べ直す
-    const ordered = [...g.children].sort(
-      (a, z) => (byId.get(a.id)?.depth ?? 0) - (byId.get(z.id)?.depth ?? 0)
-    );
-    for (const n of ordered) g.appendChild(n);
+    members.sort((a, z) => (byId.get(a.id)?.depth ?? 0) - (byId.get(z.id)?.depth ?? 0));
+    for (const n of members) g.appendChild(n);
 
     g.dataset.cx = cx;
     g.dataset.cy = cy;
     return g;
-  });
+  }).filter(Boolean);
 }
 
 // ------------------------------------------------------------ アニメーション

@@ -67,9 +67,9 @@ class Pass:
 
 # 画像全体。大きな面をなめらかに取ることを優先する。
 BASE = Pass(
-    n_colors=36, target_parts=320, min_area=150, min_weight=450,
-    close_r=3, smooth_r=5, smooth_mask=2.5, min_thickness=2.0,
-    max_fill_dist=2, rdp_k=0.018, rdp_max=0.9,
+    n_colors=48, target_parts=560, min_area=80, min_weight=240,
+    close_r=3, smooth_r=5, smooth_mask=1.7, min_thickness=2.0,
+    max_fill_dist=2, rdp_k=0.009, rdp_max=0.45,
 )
 
 # 残差の大きい ROI。小さく淡い形を拾うため、平滑化と足切りを弱める。
@@ -79,7 +79,7 @@ BASE = Pass(
 REFINE = Pass(
     n_colors=10, target_parts=40, min_area=40, min_weight=90,
     close_r=1, smooth_r=2, smooth_mask=0.8, min_thickness=1.8,
-    max_fill_dist=0, rdp_k=0.012, rdp_max=0.5,
+    max_fill_dist=0, rdp_k=0.007, rdp_max=0.3,
 )
 
 RESID_THRESH = 9.0    # この Lab 距離を超えたら「再現できていない」とみなす
@@ -92,12 +92,12 @@ CHROMA_BOOST = 2.2    # Lab の a*b* を強調して色相差を分離しやす�
 # 線画抽出。LINE_SCALE は「これより細ければ線」とみなす太さの目安。
 LINE_SCALE = 7        # black-hat の構造要素半径 (px)
 LINE_THRESH = 16      # 周囲との輝度差がこれ以上なら線とみなす
-LINE_MAX = 800        # ストロークの本数上限
+LINE_MAX = 3000       # ストロークの本数上限 (途切れを減らすため実質無制限)
 LINE_SMOOTH = 0.8     # 線マスクをぼかす sigma (0 で無効)
 LINE_OPACITY = 0.78   # 線の不透明度
 STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
 STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
-STROKE_RDP = 0.7      # 中心線を間引く強さ (元画像 px)
+STROKE_RDP = 0.45     # 中心線を間引く強さ (元画像 px)
 MOUTH_THRESH = 10     # 口を拾う black-hat のしきい値 (線画より低め)
 MOUTH_MIN_AREA = 2    # 口とみなす小塊の下限 (元画像 px)
 MOUTH_MAX_AREA = 260  # 同 上限
@@ -601,7 +601,7 @@ def to_bezier_open(pts, scale, offset):
         return ""
 
     def fmt(v):
-        return f"{v:.1f}".rstrip("0").rstrip(".")
+        return f"{v:.2f}".rstrip("0").rstrip(".")
 
     d = [f"M{fmt(p[0][0])} {fmt(p[0][1])}"]
     for i in range(n - 1):
@@ -623,7 +623,7 @@ def to_bezier(pts, scale, offset):
         return ""
 
     def fmt(v):
-        return f"{v:.1f}".rstrip("0").rstrip(".")
+        return f"{v:.2f}".rstrip("0").rstrip(".")
 
     d = [f"M{fmt(p[0][0])} {fmt(p[0][1])}"]
     for i in range(n):
