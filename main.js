@@ -79,7 +79,7 @@ function build() {
       "fill-rule": "evenodd",
       // 隣接パーツの継ぎ目に地の色が出ないよう、同じ塗りで細く縁取る
       stroke: paint,
-      "stroke-width": "0.8",
+      "stroke-width": "1.1",
       "stroke-linejoin": "round",
     };
     if (s.opacity !== undefined) attrs.opacity = s.opacity;

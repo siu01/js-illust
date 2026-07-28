@@ -91,10 +91,10 @@ CHROMA_BOOST = 2.2    # Lab の a*b* を強調して色相差を分離しやす�
 
 # 線画抽出。LINE_SCALE は「これより細ければ線」とみなす太さの目安。
 LINE_SCALE = 7        # black-hat の構造要素半径 (px)
-LINE_THRESH = 16      # 周囲との輝度差がこれ以上なら線とみなす
+LINE_THRESH = 26      # 周囲との輝度差がこれ以上なら線とみなす
 LINE_MAX = 3000       # ストロークの本数上限 (途切れを減らすため実質無制限)
 LINE_SMOOTH = 0.8     # 線マスクをぼかす sigma (0 で無効)
-LINE_OPACITY = 0.78   # 線の不透明度
+LINE_OPACITY = 0.68   # 線の不透明度
 STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
 STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
 STROKE_RDP = 0.45     # 中心線を間引く強さ (元画像 px)
