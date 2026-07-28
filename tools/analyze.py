@@ -118,6 +118,11 @@ MOUTH_INNER_COLOR = "#7d4a4c"   # 口内の色 (原画には無いので口紅�
 MOUTH_INNER_DROP = 0.85    # 口内を唇よりどれだけ下にずらすか (ry に対する比)
 
 # 動かす部位の判定 (画面で色を塗って目視で決めた値)
+# 耳の位置 (顔の下地の bbox に対する比)。画面で塗って目視で合わせた
+EAR_DX = 0.79         # 顔の中心から左右へ、顔幅の何倍か
+EAR_DY = 1.24         # 顔の上端から上へ、顔高さの何倍か
+EAR_RADIUS = 0.34     # 耳とみなす半径、顔幅の何倍か
+
 EYE_HALF_OF_GAP = 0.29  # 目の半幅 = 左右の瞳の間隔 x これ
 EYE_RADIUS_X = 30     # 瞳の中心からこの範囲を目とみなす (viewBox)
 EYE_RADIUS_Y = 26
@@ -872,7 +877,7 @@ def to_shape(part, index, rgb, scale, offset, w, h, cfg):
     return entry
 
 
-def assign_animation_parts(out):
+def assign_animation_parts(out, face_box=None):
     """
     動かす部位のラベルを付け直す。
 
@@ -908,6 +913,27 @@ def assign_animation_parts(out):
         elif s["cy"] < top + AHOGE_BAND and abs(s["cx"] - cx_all) < AHOGE_HALF_W:
             s["label"] = "ahoge"
 
+    # 耳。顔の左右外に張り出した丸い塊で、位置は顔から相対で決める。
+    # earInner ラベルは耳ではなく顔の縁を指していて当てにならなかったので、
+    # 画面で塗って位置を確かめ、その比率をそのまま置いている。
+    if face_box is not None:
+        fy0, fy1, fx0, fx1 = face_box
+        fw, fh = fx1 - fx0, fy1 - fy0
+        fcx = (fx0 + fx1) / 2
+        ear_r = fw * EAR_RADIUS
+        ears = {
+            "earL": (fcx - fw * EAR_DX, fy0 - fh * EAR_DY),
+            "earR": (fcx + fw * EAR_DX, fy0 - fh * EAR_DY),
+        }
+        for part in out:
+            if part["label"] in ("eye", "mouth", "mouthInner", "faceBase"):
+                continue
+            for name, (ear_x, ear_y) in ears.items():
+                if (math.hypot(part["cx"] - ear_x, part["cy"] - ear_y) < ear_r
+                        and part["area"] < ear_r * ear_r):
+                    part["label"] = name
+                    break
+
     # 部位の中心は解析側で決めて渡す。描画側でラベルの重心から求めると、
     # こめかみ側のパーツに引っ張られて中心が寄り、肝心の虹彩が範囲から
     # 外れる (実際それで片目だけ閉じなくなった)。
@@ -917,6 +943,9 @@ def assign_animation_parts(out):
         "eyeHalfW": round(abs(right - left) * EYE_HALF_OF_GAP, 2),
         "eyeHalfH": round(abs(right - left) * EYE_HALF_OF_GAP * 0.85, 2),
     }
+    if face_box is not None:
+        for name, (ear_x, ear_y) in ears.items():
+            anchors[name] = {"cx": round(ear_x, 2), "cy": round(ear_y, 2)}
     return out, anchors
 
 
@@ -1006,7 +1035,13 @@ def main():
     out.extend(mouth)
     print(f"mouth: +{len(mouth)} (total {len(out)} shapes)")
 
-    out, anchors = assign_animation_parts(out)
+    face_box = None
+    if face_mask is not None and face_mask.any():
+        # viewBox 座標での顔の範囲。耳の位置をここから相対で決める
+        fys, fxs = np.nonzero(face_mask)
+        face_box = (fys.min() * scale + offset[1], fys.max() * scale + offset[1],
+                    fxs.min() * scale + offset[0], fxs.max() * scale + offset[0])
+    out, anchors = assign_animation_parts(out, face_box)
 
     # 顔の下地を、顔の上にあるパーツ全部より奥に差し込む
     facing = [s for s in out if s["label"] in ("eye", "mouth")]

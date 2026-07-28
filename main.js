@@ -12,6 +12,11 @@ const NS = "http://www.w3.org/2000/svg";
 const EYE_HALF_W = 27;
 const EYE_HALF_H = 23;
 
+// 耳がぴくっと動くときの、振れ幅・持続・回転軸の下げ幅
+const EAR_TWITCH_DEG = 7;
+const EAR_TWITCH = 0.32;
+const EAR_PIVOT_DROP = 34;
+
 // 口の縦スケールの下限と上限
 const MOUTH_CLOSED = 0.55;
 const MOUTH_OPEN = 2.6;
@@ -175,12 +180,20 @@ function animate(svg) {
   const mouth = groupParts(svg, "mouth");
   const inner = groupParts(svg, "mouthInner");
   const ahoge = groupParts(svg, "ahoge");
-  if (!eyes.length && !mouth && !ahoge) return;
+  const ears = [groupParts(svg, "earL"), groupParts(svg, "earR")].filter(Boolean);
+  if (!eyes.length && !mouth && !ahoge && !ears.length) return;
 
   const at = (g) => [parseFloat(g.dataset.cx), parseFloat(g.dataset.cy)];
 
   // 口内は上端を軸に開かせたいので、潰す前の外形から上端を取っておく
   const innerTop = inner ? inner.getBBox().y : 0;
+
+  // 耳ごとの、次にぴくつく時刻と向き
+  const twitch = ears.map((_, i) => ({
+    next: 1.5 + i * 0.9 + Math.random() * 2,
+    start: -1,
+    dir: i === 0 ? -1 : 1,
+  }));
 
   // まばたきは「たまに、素早く」。等間隔だと機械的に見える
   let nextBlink = 1.2;
@@ -232,6 +245,26 @@ function animate(svg) {
       inner.setAttribute("transform",
         `translate(${cx} ${top}) scale(1 ${Math.max(0.001, h)}) translate(${-cx} ${-top})`);
       inner.setAttribute("opacity", h < 0.04 ? 0 : 1);
+    }
+
+    // 耳。ときどき片方だけぴくっと動く。左右そろえると作り物めいて見える
+    for (let i = 0; i < ears.length; i++) {
+      const g = ears[i];
+      const [cx, cy] = at(g);
+      const tw = twitch[i];
+      if (t > tw.next) {
+        tw.start = t;
+        tw.next = t + 2.5 + Math.random() * 5;
+      }
+      let a = 0;
+      if (tw.start >= 0) {
+        const p = (t - tw.start) / EAR_TWITCH;
+        if (p >= 1) tw.start = -1;
+        // 一度はねて戻る。減衰する振動
+        else a = Math.sin(p * Math.PI * 2.4) * (1 - p) * EAR_TWITCH_DEG * tw.dir;
+      }
+      // 軸は耳の根元 (下端寄り)。重心で回すと耳が浮いて見える
+      g.setAttribute("transform", `rotate(${a} ${cx} ${cy + EAR_PIVOT_DROP})`);
     }
 
     if (ahoge) {

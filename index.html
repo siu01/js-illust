@@ -30,7 +30,18 @@
       <div id="stage"></div>
     </main>
     <footer><span id="info">assets/SD.png を写真を使わず JS だけで再現</span></footer>
-    <script src="shapes.js"></script>
-    <script src="main.js"></script>
+    <!--
+      解析をかけ直しても、ブラウザが古い shapes.js / main.js を握ったままだと
+      直したはずのものを直っていないと読み違える。実際それで、耳のコードが
+      入っていない main.js を相手に「耳が出ない」と調べる羽目になった。
+      毎回別の URL にして掴ませない。
+    -->
+    <script>
+      for (const src of ["shapes.js", "main.js"]) {
+        document.write(
+          '<script src="' + src + '?v=' + Date.now() + '"><\/script>'
+        );
+      }
+    </script>
   </body>
 </html>
