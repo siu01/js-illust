@@ -166,10 +166,14 @@ function groupEyes(svg) {
 function animate(svg) {
   const eyes = groupEyes(svg);
   const mouth = groupParts(svg, "mouth");
+  const inner = groupParts(svg, "mouthInner");
   const ahoge = groupParts(svg, "ahoge");
   if (!eyes.length && !mouth && !ahoge) return;
 
   const at = (g) => [parseFloat(g.dataset.cx), parseFloat(g.dataset.cy)];
+
+  // 口内は上端を軸に開かせたいので、潰す前の外形から上端を取っておく
+  const innerTop = inner ? inner.getBBox().y : 0;
 
   // まばたきは「たまに、素早く」。等間隔だと機械的に見える
   let nextBlink = 1.2;
@@ -199,14 +203,28 @@ function animate(svg) {
         `translate(${cx} ${cy}) scale(1 ${Math.max(0.02, lid)}) translate(${-cx} ${-cy})`);
     }
 
+    // 口の開き具合。0 = 閉じ、1 = 全開
+    const openness = Math.sin(t * 1.3) * 0.5 + 0.5;
+
     if (mouth) {
       const [cx, cy] = at(mouth);
       // 原画の口は 3x2px の点が 2 つきりなので、控えめに動かしても目に
       // 見えない。縦を大きく伸ばして、点が縦長になることで開閉に見せる。
-      const wave = Math.sin(t * 1.3) * 0.5 + 0.5;            // 0..1
-      const open = MOUTH_CLOSED + wave * (MOUTH_OPEN - MOUTH_CLOSED);
+      const open = MOUTH_CLOSED + openness * (MOUTH_OPEN - MOUTH_CLOSED);
       mouth.setAttribute("transform",
         `translate(${cx} ${cy}) scale(1 ${open}) translate(${-cx} ${-cy})`);
+    }
+
+    if (inner) {
+      // 上端を固定して下に開く。中心を固定すると、口内が唇より上にも
+      // 広がって顔にめり込む。
+      const [cx] = at(inner);
+      const top = innerTop;
+      // 閉じている間は完全に潰す。細く残すと、閉じた口の隙間から暗い線が覗く
+      const h = openness * openness;                 // 開きはじめを緩やかに
+      inner.setAttribute("transform",
+        `translate(${cx} ${top}) scale(1 ${Math.max(0.001, h)}) translate(${-cx} ${-top})`);
+      inner.setAttribute("opacity", h < 0.04 ? 0 : 1);
     }
 
     if (ahoge) {

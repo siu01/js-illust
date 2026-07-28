@@ -98,9 +98,15 @@ LINE_OPACITY = 0.68   # 線の不透明度
 STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
 STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
 STROKE_RDP = 0.45     # 中心線を間引く強さ (元画像 px)
+FACE_CLOSE_R = 11     # 顔の穴 (目・口) を閉じる closing 半径 (px)
+FACE_GROW_UP = 0.55   # 顔の下地を上へ伸ばす割合 (額は前髪に隠れて写らない)
 MOUTH_THRESH = 10     # 口を拾う black-hat のしきい値 (線画より低め)
 MOUTH_MIN_AREA = 2    # 口とみなす小塊の下限 (元画像 px)
 MOUTH_MAX_AREA = 260  # 同 上限
+MOUTH_INNER_W = 1.35  # 口内の横半径 (唇の点の間隔に対する倍率)
+MOUTH_INNER_RATIO = 0.62   # 口内の縦横比
+MOUTH_INNER_COLOR = "#7d4a4c"   # 口内の色 (原画には無いので口紅寄りの暗赤)
+MOUTH_INNER_DROP = 0.85    # 口内を唇よりどれだけ下にずらすか (ry に対する比)
 
 # 動かす部位の判定 (画面で色を塗って目視で決めた値)
 EYE_RADIUS_X = 30     # 瞳の中心からこの範囲を目とみなす (viewBox)
@@ -343,6 +349,118 @@ def extract_lines(rgb, fg, smooth=True):
     if smooth and LINE_SMOOTH > 0:
         lines = ndimage.gaussian_filter(lines.astype(np.float32), LINE_SMOOTH) > 0.5
     return lines
+
+
+def detect_face(rgb, fg):
+    """肌の色から顔の領域を返す。目や口で空いた穴は閉じてある。"""
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    skin = fg & (r > 212) & ((r - b) > 16) & ((r - b) < 70) & (g > 186)
+    skin = ndimage.binary_opening(skin, disk(3))
+    lab, n = ndimage.label(skin)
+    if n == 0:
+        return None, None
+    sizes = ndimage.sum(skin, lab, range(1, n + 1))
+    face = lab == int(np.argmax(sizes)) + 1
+
+    # 額は前髪で完全に隠れていて肌として写らないので、こうして取れる「顔」は
+    # 目より下しかない (実測で目の中心が上端の 5px 上に外れる)。上へ伸ばして
+    # 目を含む顔一枚にする。ここは前髪の下に隠れる部分なので、多少大きくても
+    # 見た目には出ない。
+    ys, _ = np.nonzero(face)
+    pad = int((ys.max() - ys.min()) * FACE_GROW_UP)
+    if pad > 0:
+        up = np.zeros((pad * 2 + 1, 1), bool)
+        up[: pad + 1, 0] = True          # 上半分だけの構造要素 = 上方向へのみ膨張
+        face = ndimage.binary_dilation(face, up)
+
+    filled = ndimage.binary_closing(face, disk(FACE_CLOSE_R))
+    filled = ndimage.binary_fill_holes(filled)
+    return filled, skin
+
+
+def build_face_base(rgb, fg, scale, offset, depth):
+    """
+    顔の下地を作る。目や口を肌で塗り潰した、顔いちまいぶんの面。
+
+    前景を完全分割しているので、いまは目の下に何も無い。瞳の中心を貫いて
+    数えても要素は 1 枚きりで、目を動かせばそこは空洞になる。表情を動かす
+    には、目の下に顔がある状態にしておく必要がある。
+
+    穴の色は最も近い肌の画素から取る。目のあった場所を平均色で塗ると、
+    顔の陰影と合わずに一枚だけ浮く。
+    """
+    face, skin = detect_face(rgb, fg)
+    if face is None or not face.any():
+        return None
+
+    hole = face & ~skin
+    filled = rgb.copy()
+    if hole.any():
+        _, (iy, ix) = ndimage.distance_transform_edt(~skin, return_indices=True)
+        filled[hole] = rgb[iy[hole], ix[hole]]
+
+    ds = []
+    for pts in contours_of(face, min_area=40):
+        simp = rdp_closed(pts, 0.6)
+        if len(simp) >= 4:
+            ds.append(to_bezier(smooth_polygon(simp), scale, offset))
+    if not ds:
+        return None
+
+    cy, cx = ndimage.center_of_mass(face)
+    col = filled[face].mean(axis=0)
+    entry = {
+        "id": "face-base",
+        "label": "faceBase",
+        "fill": "#%02x%02x%02x" % tuple(int(round(c)) for c in col),
+        "depth": depth,
+        "area": round(float(face.sum()) * scale * scale, 1),
+        "cx": round(float(cx) * scale + offset[0], 1),
+        "cy": round(float(cy) * scale + offset[1], 1),
+        "d": " ".join(ds),
+    }
+    grad = fit_gradient(filled, face, scale, offset)
+    if grad:
+        entry["grad"] = grad
+    return entry
+
+
+def build_mouth_inner(mouth, depth):
+    """
+    口内を作る。原画には描かれていない — 口は 3x2px の点が 2 つきりで、
+    閉じた口しか無いのだから当然で、喋らせるならこちらで足すしかない。
+
+    唇 (点) より奥、顔の下地より手前に置く。閉じている間は縦に潰れていて
+    見えず、開くとその分だけ覗く。
+    """
+    if not mouth:
+        return None
+    cx = sum(m["cx"] for m in mouth) / len(mouth)
+    cy = sum(m["cy"] for m in mouth) / len(mouth)
+    half = max(abs(m["cx"] - cx) for m in mouth) if len(mouth) > 1 else 3.0
+    rx = max(half * MOUTH_INNER_W, 4.0)
+    ry = rx * MOUTH_INNER_RATIO
+    # 原画の点 2 つは「閉じた口」なので、それを上唇とみなして口内はその下に置く。
+    # 点の位置に重ねると、開いたときに唇が口内の真ん中に浮いてしまう。
+    cy += ry * MOUTH_INNER_DROP
+
+    # 楕円を 4 本のベジェで描く
+    k = 0.5523
+    d = (f"M{cx - rx:.2f} {cy:.2f}"
+         f"C{cx - rx:.2f} {cy - ry * k:.2f} {cx - rx * k:.2f} {cy - ry:.2f} {cx:.2f} {cy - ry:.2f}"
+         f"C{cx + rx * k:.2f} {cy - ry:.2f} {cx + rx:.2f} {cy - ry * k:.2f} {cx + rx:.2f} {cy:.2f}"
+         f"C{cx + rx:.2f} {cy + ry * k:.2f} {cx + rx * k:.2f} {cy + ry:.2f} {cx:.2f} {cy + ry:.2f}"
+         f"C{cx - rx * k:.2f} {cy + ry:.2f} {cx - rx:.2f} {cy + ry * k:.2f} {cx - rx:.2f} {cy:.2f}Z")
+    return {
+        "id": "mouth-inner",
+        "label": "mouthInner",
+        "fill": MOUTH_INNER_COLOR,
+        "depth": depth,
+        "area": round(math.pi * rx * ry, 1),
+        "cx": round(cx, 2),
+        "cy": round(cy, 2),
+        "d": d,
+    }
 
 
 def face_features(rgb, fg, scale, offset, w, h, depth_base):
@@ -845,6 +963,20 @@ def main():
     print(f"mouth: +{len(mouth)} (total {len(out)} shapes)")
 
     out = assign_animation_parts(out)
+
+    # 顔の下地を、顔の上にあるパーツ全部より奥に差し込む
+    facing = [s for s in out if s["label"] in ("eye", "mouth")]
+    if facing:
+        base_depth = min(s["depth"] for s in facing) - 1
+        base = build_face_base(rgb, fg, scale, offset, base_depth)
+        if base:
+            out.append(base)
+            print("face base: +1")
+        # 口内は下地より手前、唇より奥
+        inner = build_mouth_inner(mouth, base_depth + 0.5)
+        if inner:
+            out.append(inner)
+            print("mouth inner: +1")
 
     counts = {}
     for s in out:
