@@ -57,6 +57,7 @@ class Pass:
     max_fill_dist: float   # 暗い線を穴埋めで太らせない最大距離
     rdp_k: float           # 輪郭単純化の強さ (面積に比例)
     rdp_max: float         # 同 上限
+    smooth_poly: int = 1   # 輪郭の点列にかける移動平均の回数
 
 
 # 画像全体。大きな面をなめらかに取ることを優先する。
@@ -95,7 +96,7 @@ LINE_OPACITY = 0.78   # 線パーツの不透明度
 LINE_PASS = Pass(
     n_colors=1, target_parts=0, min_area=LINE_MIN_AREA, min_weight=0,
     close_r=1, smooth_r=1, smooth_mask=0.0, min_thickness=0.0,
-    max_fill_dist=0, rdp_k=0.008, rdp_max=0.35,
+    max_fill_dist=0, rdp_k=0.008, rdp_max=0.25, smooth_poly=2,
 )
 
 
@@ -602,7 +603,7 @@ def to_shape(part, index, rgb, scale, offset, w, h, cfg):
         simp = rdp_closed(pts, eps)
         if len(simp) < 4:
             continue
-        ds.append(to_bezier(smooth_polygon(simp), scale, offset))
+        ds.append(to_bezier(smooth_polygon(simp, cfg.smooth_poly), scale, offset))
     if not ds:
         return None
 
