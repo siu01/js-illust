@@ -88,6 +88,7 @@ LINE_SCALE = 7        # black-hat の構造要素半径 (px)
 LINE_THRESH = 16      # 周囲との輝度差がこれ以上なら線とみなす
 LINE_MIN_AREA = 90    # これ未満の線片は捨てる (元画像 px)
 LINE_MAX = 240        # 線パーツの個数上限 (面積の大きい順)
+LINE_SMOOTH = 0.8     # 線マスクの角を落とすガウシアン sigma (px)
 
 # 線は細いので、面と同じだけ簡略化・平滑化すると形が崩れる
 LINE_PASS = Pass(
@@ -324,6 +325,9 @@ def extract_lines(rgb, fg):
     lines = fg & (black_hat > LINE_THRESH)
     # 1px のごま塩を落とす。線そのものは細いので opening は最小限に
     lines = ndimage.binary_opening(lines, disk(1))
+    # 細いマスクの輪郭はそのままだと往復して棘だらけになる。閾値 0.5 の
+    # ガウシアンで角を落とす (太さは変えない)。
+    lines = ndimage.gaussian_filter(lines.astype(np.float32), LINE_SMOOTH) > 0.5
     return lines
 
 
