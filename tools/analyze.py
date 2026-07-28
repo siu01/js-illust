@@ -98,7 +98,8 @@ LINE_OPACITY = 0.78   # 線の不透明度
 STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
 STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
 STROKE_RDP = 0.7      # 中心線を間引く強さ (元画像 px)
-MOUTH_MIN_AREA = 3    # 口とみなす小塊の下限 (元画像 px)
+MOUTH_THRESH = 10     # 口を拾う black-hat のしきい値 (線画より低め)
+MOUTH_MIN_AREA = 2    # 口とみなす小塊の下限 (元画像 px)
 MOUTH_MAX_AREA = 260  # 同 上限
 
 # 動かす部位の判定 (画面で色を塗って目視で決めた値)
@@ -344,14 +345,22 @@ def extract_lines(rgb, fg, smooth=True):
     return lines
 
 
-def face_features(rgb, fg, lines, scale, offset, w, h, depth_base):
+def face_features(rgb, fg, scale, offset, w, h, depth_base):
     """
     顔の中の小さな特徴 — このイラストでは口 — を個別に拾う。
 
-    原画の口は 5px ほどの「へ」の字が 2 つあるだけで、面パスの足切りにも
-    ストロークの最小長にもかからない。表情を動かすには要るので、顔の位置を
-    肌の色から割り出し、その下寄り中央にある線マスクの小塊だけを取り出す。
+    原画の口は 3x2px ほどの点が 2 つあるだけで、面パスの足切りにもストローク
+    の最小長にもかからない。表情を動かすには要るので、顔の位置を肌の色から
+    割り出し、その下寄り中央にある小塊を取り出す。
+
+    線画マスクは使わない。あちらは opening で 1px のごま塩を落としているが、
+    口の右側の点はまさにその大きさなので、一緒に消えてしまう。ここでは
+    black-hat から直接、opening なしで拾う。
     """
+    gray = rgb.mean(axis=2)
+    black_hat = ndimage.grey_closing(gray, footprint=disk(LINE_SCALE)) - gray
+    marks = fg & (black_hat > MOUTH_THRESH)
+
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     skin = fg & (r > 212) & ((r - b) > 16) & ((r - b) < 70) & (g > 186)
     skin = ndimage.binary_opening(skin, disk(4))
@@ -368,8 +377,8 @@ def face_features(rgb, fg, lines, scale, offset, w, h, depth_base):
     # 顔の下寄り中央だけを見る。目やまつ毛を巻き込まないための窓
     box = (y0 + int(fh * 0.55), y0 + int(fh * 0.92),
            x0 + int(fw * 0.25), x0 + int(fw * 0.75))
-    region = np.zeros_like(lines)
-    region[box[0]:box[1], box[2]:box[3]] = lines[box[0]:box[1], box[2]:box[3]]
+    region = np.zeros_like(marks)
+    region[box[0]:box[1], box[2]:box[3]] = marks[box[0]:box[1], box[2]:box[3]]
 
     llab, ln = ndimage.label(region, structure=np.ones((3, 3)))
     out = []
@@ -830,9 +839,8 @@ def main():
     out.extend(strokes)
     print(f"strokes: +{len(strokes)} (total {len(out)} shapes)")
 
-    # 口はぼかす前のマスクから拾う (ぼかすと 5px の形が消える)
-    mouth = face_features(rgb, fg, extract_lines(rgb, fg, smooth=False),
-                          scale, offset, w, h, len(parts) + len(strokes))
+    mouth = face_features(rgb, fg, scale, offset, w, h,
+                          len(parts) + len(strokes))
     out.extend(mouth)
     print(f"mouth: +{len(mouth)} (total {len(out)} shapes)")
 

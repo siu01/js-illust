@@ -11,6 +11,10 @@ const NS = "http://www.w3.org/2000/svg";
 // 大きくすると頬まで巻き込み、小さくすると白目が取り残される。
 const EYE_INNER_RATIO = 0.42;
 
+// 口の縦スケールの下限と上限
+const MOUTH_CLOSED = 0.55;
+const MOUTH_OPEN = 2.6;
+
 function el(tag, attrs) {
   const node = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
@@ -195,8 +199,10 @@ function animate(svg) {
 
     if (mouth) {
       const [cx, cy] = at(mouth);
-      // 呼吸に合わせてわずかに開閉するだけ。原画の口は 5px しかない
-      const open = 1 + Math.sin(t * 1.1) * 0.35;
+      // 原画の口は 3x2px の点が 2 つきりなので、控えめに動かしても目に
+      // 見えない。縦を大きく伸ばして、点が縦長になることで開閉に見せる。
+      const wave = Math.sin(t * 1.3) * 0.5 + 0.5;            // 0..1
+      const open = MOUTH_CLOSED + wave * (MOUTH_OPEN - MOUTH_CLOSED);
       mouth.setAttribute("transform",
         `translate(${cx} ${cy}) scale(1 ${open}) translate(${-cx} ${-cy})`);
     }
