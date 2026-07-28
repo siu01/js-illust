@@ -2,14 +2,17 @@
 """
 assets/SD.png を解析して、SVG パスの集合 (shapes.js) を生成する。
 
-2 パス構成:
+構成:
   パス1  画像全体を粗く分割する。大きな面 (髪・パーカー・肌) を取る。
   パス2  パス1 の結果を塗り直した「復元画像」と原画の色差を測り、誤差の
          大きい領域だけを ROI として切り出して細かく再解析する。ロゴの
          文字や口のように小さくてコントラストの低い部分は、全体設定では
          平滑化に溶けてしまうため、この 2 パス目で拾う。
+  線画   原画は「線画 + 塗り」で描かれている。面だけでは線が落ちるので、
+         black-hat で線を取り出し、中心線 + 線幅のストロークにして重ねる
+         (strokes.py)。面として塗ると輪郭が往復して棘になるため。
 
-各パスの中身:
+面パスの中身:
   1. 背景 (外周から白のまま繋がる領域) を除去して前景マスクを作る
   2. メディアンで階調をならし、Lab 色空間で k-means 減色
   3. 色クラスタを連結成分に分け、面積 x 重要度で採否を決める
@@ -33,6 +36,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.path import Path as MPath
+
+from strokes import strokes_from_mask
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "assets" / "SD.png"
@@ -87,17 +92,12 @@ CHROMA_BOOST = 2.2    # Lab の a*b* を強調して色相差を分離しやす�
 # 線画抽出。LINE_SCALE は「これより細ければ線」とみなす太さの目安。
 LINE_SCALE = 7        # black-hat の構造要素半径 (px)
 LINE_THRESH = 16      # 周囲との輝度差がこれ以上なら線とみなす
-LINE_MIN_AREA = 90    # これ未満の線片は捨てる (元画像 px)
-LINE_MAX = 240        # 線パーツの個数上限 (面積の大きい順)
+LINE_MAX = 800        # ストロークの本数上限
 LINE_SMOOTH = 0.8     # 線マスクの角を落とすガウシアン sigma (px)
-LINE_OPACITY = 0.78   # 線パーツの不透明度
-
-# 線は細いので、面と同じだけ簡略化・平滑化すると形が崩れる
-LINE_PASS = Pass(
-    n_colors=1, target_parts=0, min_area=LINE_MIN_AREA, min_weight=0,
-    close_r=1, smooth_r=1, smooth_mask=0.0, min_thickness=0.0,
-    max_fill_dist=0, rdp_k=0.008, rdp_max=0.25, smooth_poly=2,
-)
+LINE_OPACITY = 0.78   # 線の不透明度
+STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
+STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
+STROKE_RDP = 0.7      # 中心線を間引く強さ (元画像 px)
 
 
 def disk(r):
@@ -333,29 +333,43 @@ def extract_lines(rgb, fg):
     return lines
 
 
-def line_parts(rgb, lines, depth_base):
-    """線画マスクを連結成分に分け、そのままの太さでパーツにする。"""
-    lab, n = ndimage.label(lines, structure=np.ones((3, 3)))
-    if n == 0:
-        return []
-    areas = ndimage.sum(lines, lab, range(1, n + 1))
-    parts = []
-    for idx, area in enumerate(areas, start=1):
-        if area < LINE_MIN_AREA:
+def stroke_shapes(rgb, lines, scale, offset, w, h, depth_base):
+    """
+    線画マスクを中心線 + 線幅のストロークに変換して、shapes.js のエントリにする。
+
+    面として塗ると輪郭が往復して棘になり、それを平滑化で消そうとすると細い線
+    ごと消える。中心線と幅に分ければ、その二つが独立する。動かしたときも線幅が
+    追従するので、部位アニメーションにも向く。
+    """
+    sts = strokes_from_mask(lines, rgb, min_length=STROKE_MIN_LEN)
+    sts.sort(key=lambda s: -s["length"] * s["width"])
+
+    out = []
+    for i, st in enumerate(sts[:LINE_MAX]):
+        pts = st["points"][:, ::-1]              # (row, col) → (x, y)
+        simp = rdp(pts, STROKE_RDP)
+        if len(simp) < 2:
             continue
-        mask = lab == idx
-        parts.append({
-            "mask": mask,
-            "area": float(area),
-            "color": rgb[mask].mean(axis=0),
-            "ci": -1,
-            "depth": 0,
+        width = st["width"] * scale
+        if width < STROKE_MIN_WIDTH:
+            continue
+        col = st["color"]
+        cx, cy = simp.mean(axis=0) * scale + offset
+        out.append({
+            "id": f"s{i:03d}",
+            "label": guess_label(col, cx / scale, cy / scale, w, h),
+            "stroke": "#%02x%02x%02x" % tuple(
+                int(round(min(255, max(0, c)))) for c in col),
+            "width": round(float(width), 2),
+            "opacity": LINE_OPACITY,
+            "depth": depth_base + i,
+            # 面パーツとソートの土俵を揃えるための概算面積
+            "area": round(float(st["length"]) * width * scale, 1),
+            "cx": round(float(cx), 1),
+            "cy": round(float(cy), 1),
+            "d": to_bezier_open(simp, scale, offset),
         })
-    # 線は太いものから順に。細い線が上に来るようにする
-    parts.sort(key=lambda p: -p["area"])
-    for i, part in enumerate(parts[:LINE_MAX]):
-        part["depth"] = depth_base + i
-    return parts[:LINE_MAX]
+    return out
 
 
 def residual_map(rgb, fg, parts):
@@ -502,6 +516,28 @@ def smooth_polygon(pts, iterations=1):
     return pts
 
 
+def to_bezier_open(pts, scale, offset):
+    """開いた点列を Catmull-Rom 経由で 3 次ベジェにする (ストローク用、Z なし)。"""
+    p = pts * scale + offset
+    n = len(p)
+    if n < 2:
+        return ""
+
+    def fmt(v):
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+
+    d = [f"M{fmt(p[0][0])} {fmt(p[0][1])}"]
+    for i in range(n - 1):
+        p0 = p[max(0, i - 1)]
+        p1, p2 = p[i], p[i + 1]
+        p3 = p[min(n - 1, i + 2)]
+        c1 = p1 + (p2 - p0) / 6.0
+        c2 = p2 - (p3 - p1) / 6.0
+        d.append(f"C{fmt(c1[0])} {fmt(c1[1])} {fmt(c2[0])} {fmt(c2[1])} "
+                 f"{fmt(p2[0])} {fmt(p2[1])}")
+    return "".join(d)
+
+
 def to_bezier(pts, scale, offset):
     """閉じた点列を Catmull-Rom 経由で 3 次ベジェの d 文字列にする。"""
     p = pts * scale + offset
@@ -619,12 +655,6 @@ def to_shape(part, index, rgb, scale, offset, w, h, cfg):
         "cy": round(cy * scale + offset[1], 1),
         "d": " ".join(ds),
     }
-    if cfg is LINE_PASS:
-        # black-hat が拾うのは線の芯なので、平均色は原画の線より濃く出る。
-        # 原画の線はアンチエイリアスで周囲に溶けているぶん軽いので、
-        # 不透明度を落として釣り合わせる。
-        entry["line"] = True
-        entry["opacity"] = LINE_OPACITY
     grad = fit_gradient(rgb, part["mask"], scale, offset)
     if grad:
         entry["grad"] = grad
@@ -671,14 +701,6 @@ def main():
     # --- 最後に線画を最前面へ ---
     # 残差マップを見ると、面はほぼ再現できていて、残っているのはほとんどが
     # 線画だった。線を面として太らせずに、そのままの太さで重ねる。
-    lines = extract_lines(rgb, fg)
-    lparts = line_parts(rgb, lines, len(parts))
-    for part in lparts:
-        part["cfg"] = LINE_PASS
-    parts.extend(lparts)
-    print(f"lines: +{len(lparts)} parts (total {len(parts)})")
-    report_residual(rgb, fg, parts, "after lines")
-
     # 元画像 → viewBox へのスケール。被写体を中央に収める
     ys, xs = np.nonzero(fg)
     bx0, bx1, by0, by1 = xs.min(), xs.max(), ys.min(), ys.max()
@@ -694,6 +716,13 @@ def main():
         entry = to_shape(part, i, rgb, scale, offset, w, h, part["cfg"])
         if entry:
             out.append(entry)
+
+    # --- 最後に線画をストロークとして最前面へ ---
+    # 残差マップを見ると、面はほぼ再現できていて残りはほとんど線画だった。
+    lines = extract_lines(rgb, fg)
+    strokes = stroke_shapes(rgb, lines, scale, offset, w, h, len(parts))
+    out.extend(strokes)
+    print(f"strokes: +{len(strokes)} (total {len(out)} shapes)")
 
     counts = {}
     for s in out:

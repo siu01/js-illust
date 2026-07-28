@@ -29,6 +29,23 @@ function build() {
   // 描画順は解析時に決めた depth (奥 → 手前)。
   // ラベルは data-label に残しておき、アニメーション時の部位選択に使う。
   for (const s of [...shapes].sort((a, b) => a.depth - b.depth || b.area - a.area)) {
+    // 線画は中心線 + 線幅のストローク。面のように塗りつぶさない。
+    if (s.stroke) {
+      const attrs = {
+        id: s.id,
+        "data-label": s.label,
+        d: s.d,
+        fill: "none",
+        stroke: s.stroke,
+        "stroke-width": s.width,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      };
+      if (s.opacity !== undefined) attrs.opacity = s.opacity;
+      svg.appendChild(el("path", attrs));
+      continue;
+    }
+
     let paint = s.fill;
 
     if (s.grad) {
@@ -57,9 +74,6 @@ function build() {
       "stroke-linejoin": "round",
     };
     if (s.opacity !== undefined) attrs.opacity = s.opacity;
-    // 線パーツは面の上に載せるだけなので、継ぎ目を埋める必要がない。
-    // 縁取ると線が太って原画より重くなる。
-    if (s.line) attrs["stroke-width"] = "0";
 
     svg.appendChild(el("path", attrs));
   }
