@@ -82,6 +82,14 @@ REFINE = Pass(
     max_fill_dist=0, rdp_k=0.007, rdp_max=0.3,
 )
 
+# 顔は絵の要。残差では ROI に挙がらない程度の差でも、目のグラデーションや
+# ハイライトが落ちれば別人になる。ここだけは常に、最も細かい設定でかけ直す。
+FACE_REFINE = Pass(
+    n_colors=18, target_parts=260, min_area=12, min_weight=24,
+    close_r=1, smooth_r=2, smooth_mask=0.6, min_thickness=1.2,
+    max_fill_dist=0, rdp_k=0.006, rdp_max=0.25, smooth_poly=1,
+)
+
 RESID_THRESH = 9.0    # この Lab 距離を超えたら「再現できていない」とみなす
 ROI_MIN_AREA = 260    # これ未満の残差領域は ROI にしない (元画像 px)
 ROI_PAD = 10          # ROI の外側に取る余白 (px)
@@ -95,6 +103,7 @@ LINE_THRESH = 26      # 周囲との輝度差がこれ以上なら線とみな�
 LINE_MAX = 3000       # ストロークの本数上限 (途切れを減らすため実質無制限)
 LINE_SMOOTH = 0.8     # 線マスクをぼかす sigma (0 で無効)
 LINE_OPACITY = 0.68   # 線の不透明度
+DARK_NO_LINE = 118    # 面がこれより暗く塗られている所には線を引かない
 STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
 STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
 STROKE_RDP = 0.45     # 中心線を間引く強さ (元画像 px)
@@ -109,6 +118,7 @@ MOUTH_INNER_COLOR = "#7d4a4c"   # 口内の色 (原画には無いので口紅�
 MOUTH_INNER_DROP = 0.85    # 口内を唇よりどれだけ下にずらすか (ry に対する比)
 
 # 動かす部位の判定 (画面で色を塗って目視で決めた値)
+EYE_HALF_OF_GAP = 0.29  # 目の半幅 = 左右の瞳の間隔 x これ
 EYE_RADIUS_X = 30     # 瞳の中心からこの範囲を目とみなす (viewBox)
 EYE_RADIUS_Y = 26
 EYE_MAX_LUM = 195     # これより明るいものは肌や前髪なので目に含めない
@@ -329,7 +339,7 @@ def analyze_region(rgb, fg, cfg, box=None):
 
 
 # ------------------------------------------------------------ 線画の抽出
-def extract_lines(rgb, fg, smooth=True):
+def extract_lines(rgb, fg, smooth=True, painted=None):
     """
     原画は「線画 + 塗り」で描かれている。面だけを再現しても線が落ちるので、
     ここで線だけを取り出す。
@@ -346,6 +356,12 @@ def extract_lines(rgb, fg, smooth=True):
     lines = fg & (black_hat > LINE_THRESH)
     # 1px のごま塩を落とす。線そのものは細いので opening は最小限に
     lines = ndimage.binary_opening(lines, disk(1))
+
+    if painted is not None:
+        # まつ毛のように「太くて暗い面」は、面パスとして既に描かれている。
+        # その内部の濃淡まで black-hat が線として拾うので、放っておくと
+        # 目の上が線 19 本の黒帯になる。既に暗く塗られている所には引かない。
+        lines &= painted.mean(axis=2) > DARK_NO_LINE
     if smooth and LINE_SMOOTH > 0:
         lines = ndimage.gaussian_filter(lines.astype(np.float32), LINE_SMOOTH) > 0.5
     return lines
@@ -866,13 +882,13 @@ def assign_animation_parts(out):
     """
     iris = [s for s in out if s["label"] == "iris"]
     if not iris:
-        return out
-    ex = sorted(s["cx"] for s in iris)
+        return out, {}
+    ex = [s["cx"] for s in iris]
     ey = sum(s["cy"] for s in iris) / len(iris)
-    left = sum(x for x in ex if x < sum(ex) / len(ex))
-    left /= max(1, sum(1 for x in ex if x < sum(ex) / len(ex)))
-    right = sum(x for x in ex if x >= sum(ex) / len(ex))
-    right /= max(1, sum(1 for x in ex if x >= sum(ex) / len(ex)))
+    mid = sum(ex) / len(ex)
+    lo = [x for x in ex if x < mid] or [mid]
+    hi = [x for x in ex if x >= mid] or [mid]
+    left, right = sum(lo) / len(lo), sum(hi) / len(hi)
 
     def luminance(s):
         c = (s.get("fill") or s.get("stroke") or "#000")[1:]
@@ -891,7 +907,17 @@ def assign_animation_parts(out):
             s["label"] = "eye"
         elif s["cy"] < top + AHOGE_BAND and abs(s["cx"] - cx_all) < AHOGE_HALF_W:
             s["label"] = "ahoge"
-    return out
+
+    # 部位の中心は解析側で決めて渡す。描画側でラベルの重心から求めると、
+    # こめかみ側のパーツに引っ張られて中心が寄り、肝心の虹彩が範囲から
+    # 外れる (実際それで片目だけ閉じなくなった)。
+    anchors = {
+        "eyeL": {"cx": round(left, 2), "cy": round(ey, 2)},
+        "eyeR": {"cx": round(right, 2), "cy": round(ey, 2)},
+        "eyeHalfW": round(abs(right - left) * EYE_HALF_OF_GAP, 2),
+        "eyeHalfH": round(abs(right - left) * EYE_HALF_OF_GAP * 0.85, 2),
+    }
+    return out, anchors
 
 
 # ------------------------------------------------------------------ main
@@ -906,6 +932,21 @@ def main():
     for part in parts:
         part["cfg"] = BASE
     report_residual(rgb, fg, parts, "after pass 1")
+
+    # --- 顔だけは無条件で細かくかけ直す ---
+    face_mask, _ = detect_face(rgb, fg)
+    if face_mask is not None and face_mask.any():
+        fys, fxs = np.nonzero(face_mask)
+        fbox = (max(0, fys.min() - 6), min(h, fys.max() + 6),
+                max(0, fxs.min() - 6), min(w, fxs.max() + 6))
+        sub = analyze_region(rgb, fg, FACE_REFINE, fbox)
+        base_depth = len(parts)
+        for part in sub:
+            part["cfg"] = FACE_REFINE
+            part["depth"] += base_depth
+        parts.extend(sub)
+        print(f"face refine: +{len(sub)} parts (total {len(parts)})")
+        report_residual(rgb, fg, parts, "after face refine")
 
     # --- パス2 以降: 残差の大きい ROI だけ細かく、を繰り返す ---
     # 1 周ごとに直せた場所の残差は下がるので、次に効く場所が自動的に浮上する。
@@ -952,7 +993,10 @@ def main():
 
     # --- 最後に線画をストロークとして最前面へ ---
     # 残差マップを見ると、面はほぼ再現できていて残りはほとんど線画だった。
-    lines = extract_lines(rgb, fg)
+    painted = np.zeros_like(rgb)
+    for part in parts:
+        painted[part["mask"]] = part["color"]
+    lines = extract_lines(rgb, fg, painted=painted)
     strokes = stroke_shapes(rgb, lines, scale, offset, w, h, len(parts))
     out.extend(strokes)
     print(f"strokes: +{len(strokes)} (total {len(out)} shapes)")
@@ -962,7 +1006,7 @@ def main():
     out.extend(mouth)
     print(f"mouth: +{len(mouth)} (total {len(out)} shapes)")
 
-    out = assign_animation_parts(out)
+    out, anchors = assign_animation_parts(out)
 
     # 顔の下地を、顔の上にあるパーツ全部より奥に差し込む
     facing = [s for s in out if s["label"] in ("eye", "mouth")]
@@ -984,10 +1028,12 @@ def main():
     print("labels:", counts)
 
     body = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+    anchor_body = json.dumps(anchors, ensure_ascii=False, separators=(",", ":"))
     OUT.write_text(
         "// 自動生成: tools/analyze.py が assets/SD.png を解析して出力。\n"
         "// 実行時に画像は参照しない — 以下は座標と色だけのデータ。\n"
-        f"window.OKOJO_SHAPES = {body};\n",
+        f"window.OKOJO_SHAPES = {body};\n"
+        f"window.OKOJO_ANCHORS = {anchor_body};\n",
         encoding="utf-8",
     )
     print(f"wrote {OUT} ({OUT.stat().st_size / 1024:.1f} KB, {len(out)} shapes)")

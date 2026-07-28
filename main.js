@@ -129,11 +129,18 @@ function groupEyes(svg) {
 
   const byId = new Map(all.map((s) => [s.id, s]));
 
+  const anchors = window.OKOJO_ANCHORS || {};
+  const halfW = anchors.eyeHalfW || EYE_HALF_W;
+  const halfH = anchors.eyeHalfH || EYE_HALF_H;
+
   return sides.filter((side) => side.length).map((side, i) => {
-    const cx = median(side.map((s) => s.cx));
-    const cy = median(side.map((s) => s.cy));
-    const x0 = cx - EYE_HALF_W, x1 = cx + EYE_HALF_W;
-    const y0 = cy - EYE_HALF_H, y1 = cy + EYE_HALF_H;
+    // 中心は解析側が瞳から出したものを使う。こちらでラベルの重心を取ると
+    // こめかみ側のパーツに引っ張られ、虹彩が範囲から外れてしまう。
+    const a = anchors["eye" + (i ? "R" : "L")];
+    const cx = a ? a.cx : median(side.map((s) => s.cx));
+    const cy = a ? a.cy : median(side.map((s) => s.cy));
+    const x0 = cx - halfW, x1 = cx + halfW;
+    const y0 = cy - halfH, y1 = cy + halfH;
 
     // 目の領域に「描画範囲ごと」収まるものだけを集める。重心で判定すると、
     // 目の上を通り過ぎるだけの長い髪の線まで入り、グループの外形が顔ごと
