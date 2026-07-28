@@ -89,6 +89,7 @@ LINE_THRESH = 16      # 周囲との輝度差がこれ以上なら線とみな�
 LINE_MIN_AREA = 90    # これ未満の線片は捨てる (元画像 px)
 LINE_MAX = 240        # 線パーツの個数上限 (面積の大きい順)
 LINE_SMOOTH = 0.8     # 線マスクの角を落とすガウシアン sigma (px)
+LINE_OPACITY = 0.78   # 線パーツの不透明度
 
 # 線は細いので、面と同じだけ簡略化・平滑化すると形が崩れる
 LINE_PASS = Pass(
@@ -617,6 +618,12 @@ def to_shape(part, index, rgb, scale, offset, w, h, cfg):
         "cy": round(cy * scale + offset[1], 1),
         "d": " ".join(ds),
     }
+    if cfg is LINE_PASS:
+        # black-hat が拾うのは線の芯なので、平均色は原画の線より濃く出る。
+        # 原画の線はアンチエイリアスで周囲に溶けているぶん軽いので、
+        # 不透明度を落として釣り合わせる。
+        entry["line"] = True
+        entry["opacity"] = LINE_OPACITY
     grad = fit_gradient(rgb, part["mask"], scale, offset)
     if grad:
         entry["grad"] = grad

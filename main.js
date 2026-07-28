@@ -45,19 +45,23 @@ function build() {
       paint = `url(#${gid})`;
     }
 
-    svg.appendChild(
-      el("path", {
-        id: s.id,
-        "data-label": s.label,
-        d: s.d,
-        fill: paint,
-        "fill-rule": "evenodd",
-        // 隣接パーツの継ぎ目に地の色が出ないよう、同じ塗りで細く縁取る
-        stroke: paint,
-        "stroke-width": "0.8",
-        "stroke-linejoin": "round",
-      })
-    );
+    const attrs = {
+      id: s.id,
+      "data-label": s.label,
+      d: s.d,
+      fill: paint,
+      "fill-rule": "evenodd",
+      // 隣接パーツの継ぎ目に地の色が出ないよう、同じ塗りで細く縁取る
+      stroke: paint,
+      "stroke-width": "0.8",
+      "stroke-linejoin": "round",
+    };
+    if (s.opacity !== undefined) attrs.opacity = s.opacity;
+    // 線パーツは面の上に載せるだけなので、継ぎ目を埋める必要がない。
+    // 縁取ると線が太って原画より重くなる。
+    if (s.line) attrs["stroke-width"] = "0";
+
+    svg.appendChild(el("path", attrs));
   }
 
   return svg;
