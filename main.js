@@ -7,6 +7,10 @@
 
 const NS = "http://www.w3.org/2000/svg";
 
+// まつ毛と瞳が作る外形の、この割合ぶんを「目の内側」とみなす。
+// 大きくすると頬まで巻き込み、小さくすると白目が取り残される。
+const EYE_INNER_RATIO = 0.42;
+
 function el(tag, attrs) {
   const node = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
@@ -81,10 +85,141 @@ function build() {
   return svg;
 }
 
+// --------------------------------------------------------------- 部位分け
+// 同じラベルのパーツをまとめて <g> に入れ直す。<g> ごと transform すれば
+// 部位単位で動かせる。回転や拡縮の原点はその部位の重心に置く。
+function groupParts(svg, label) {
+  const nodes = [...svg.querySelectorAll(`[data-label="${label}"]`)];
+  if (!nodes.length) return null;
+
+  const shapes = (window.OKOJO_SHAPES || []).filter((s) => s.label === label);
+  const cx = shapes.reduce((a, s) => a + s.cx, 0) / shapes.length;
+  const cy = shapes.reduce((a, s) => a + s.cy, 0) / shapes.length;
+
+  // 元の重なり順を壊さないよう、最前面のパーツがいた場所にグループを差し込む
+  const g = el("g", { "data-part": label });
+  nodes[nodes.length - 1].after(g);
+  for (const n of nodes) g.appendChild(n);
+
+  g.dataset.cx = cx;
+  g.dataset.cy = cy;
+  return g;
+}
+
+// 左右の目は別々に動かしたいので、中心より左か右かで分ける
+function groupEyes(svg) {
+  const all = window.OKOJO_SHAPES || [];
+  const nodes = [...svg.querySelectorAll('[data-label="eye"]')];
+  if (!nodes.length) return [];
+  const shapes = all.filter((s) => s.label === "eye");
+  const mid = shapes.reduce((a, s) => a + s.cx, 0) / shapes.length;
+
+  const sides = [[], []];
+  for (const n of nodes) {
+    const s = shapes.find((x) => x.id === n.id);
+    if (s) sides[s.cx < mid ? 0 : 1].push([n, s]);
+  }
+
+  const byId = new Map(all.map((s) => [s.id, s]));
+
+  return sides.filter((side) => side.length).map((side, i) => {
+    const g = el("g", { "data-part": "eye" + (i ? "R" : "L") });
+    side[side.length - 1][0].after(g);
+    for (const [n] of side) g.appendChild(n);
+
+    // ここまでに入っているのは暗いパーツ (まつ毛と瞳) だけ。白目は肌より
+    // 明るいので色では拾えず、置き去りにすると目を閉じたときに白い穴が残る。
+    // まつ毛と瞳が作る外形の内側にあるものを、明るさに関係なく取り込む。
+    // 頬はこの外形の下にあるので入らない。
+    const b = g.getBBox();
+    const cx = b.x + b.width / 2;
+    const cy = b.y + b.height / 2;
+    const rx = b.width * EYE_INNER_RATIO;
+    const ry = b.height * EYE_INNER_RATIO;
+    for (const s of all) {
+      if (s.label === "eye" || s.label === "mouth" || s.label === "ahoge") continue;
+      if (Math.abs(s.cx - cx) < rx && Math.abs(s.cy - cy) < ry) {
+        const n = svg.getElementById(s.id);
+        if (n && n.parentNode !== g) g.appendChild(n);
+      }
+    }
+
+    // 取り込みで重なり順が崩れるので、解析時の depth で並べ直す
+    const ordered = [...g.children].sort(
+      (a, z) => (byId.get(a.id)?.depth ?? 0) - (byId.get(z.id)?.depth ?? 0)
+    );
+    for (const n of ordered) g.appendChild(n);
+
+    g.dataset.cx = cx;
+    g.dataset.cy = cy;
+    return g;
+  });
+}
+
+// ------------------------------------------------------------ アニメーション
+function animate(svg) {
+  const eyes = groupEyes(svg);
+  const mouth = groupParts(svg, "mouth");
+  const ahoge = groupParts(svg, "ahoge");
+  if (!eyes.length && !mouth && !ahoge) return;
+
+  const at = (g) => [parseFloat(g.dataset.cx), parseFloat(g.dataset.cy)];
+
+  // まばたきは「たまに、素早く」。等間隔だと機械的に見える
+  let nextBlink = 1.2;
+  let blinkStart = -1;
+  const BLINK = 0.13;                       // 閉じて開くまで
+
+  const t0 = performance.now();
+  function frame(now) {
+    const t = (now - t0) / 1000;
+
+    if (t > nextBlink && blinkStart < 0) blinkStart = t;
+    let lid = 1;
+    if (blinkStart >= 0) {
+      const p = (t - blinkStart) / BLINK;
+      if (p >= 1) {
+        blinkStart = -1;
+        // 次は 2〜6 秒後。ときどき二回続けて瞬きする
+        nextBlink = t + (Math.random() < 0.22 ? 0.22 : 2 + Math.random() * 4);
+      } else {
+        // 閉じ切りで 0 になる三角波。開くほうを少し緩やかに
+        lid = p < 0.45 ? 1 - p / 0.45 : (p - 0.45) / 0.55;
+      }
+    }
+    for (const g of eyes) {
+      const [cx, cy] = at(g);
+      g.setAttribute("transform",
+        `translate(${cx} ${cy}) scale(1 ${Math.max(0.02, lid)}) translate(${-cx} ${-cy})`);
+    }
+
+    if (mouth) {
+      const [cx, cy] = at(mouth);
+      // 呼吸に合わせてわずかに開閉するだけ。原画の口は 5px しかない
+      const open = 1 + Math.sin(t * 1.1) * 0.35;
+      mouth.setAttribute("transform",
+        `translate(${cx} ${cy}) scale(1 ${open}) translate(${-cx} ${-cy})`);
+    }
+
+    if (ahoge) {
+      const [cx, cy] = at(ahoge);
+      // 根元を軸に揺らす。重心ではなく下端を中心にしたいので少し下げる
+      const pivotY = cy + 26;
+      const a = Math.sin(t * 1.5) * 3.2 + Math.sin(t * 2.7) * 1.1;
+      ahoge.setAttribute("transform", `rotate(${a} ${cx} ${pivotY})`);
+    }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
 function render() {
   const stage = document.getElementById("stage");
   stage.innerHTML = "";
-  stage.appendChild(build());
+  const svg = build();
+  stage.appendChild(svg);
+  animate(svg);
   reportStats();
 }
 

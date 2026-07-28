@@ -93,11 +93,20 @@ CHROMA_BOOST = 2.2    # Lab の a*b* を強調して色相差を分離しやす�
 LINE_SCALE = 7        # black-hat の構造要素半径 (px)
 LINE_THRESH = 16      # 周囲との輝度差がこれ以上なら線とみなす
 LINE_MAX = 800        # ストロークの本数上限
-LINE_SMOOTH = 0.8     # 線マスクの角を落とすガウシアン sigma (px)
+LINE_SMOOTH = 0.8     # 線マスクをぼかす sigma (0 で無効)
 LINE_OPACITY = 0.78   # 線の不透明度
 STROKE_MIN_LEN = 5    # これより短い枝は捨てる (中心線の画素数)
 STROKE_MIN_WIDTH = 0.6  # これより細いストロークは捨てる (viewBox 単位)
 STROKE_RDP = 0.7      # 中心線を間引く強さ (元画像 px)
+MOUTH_MIN_AREA = 3    # 口とみなす小塊の下限 (元画像 px)
+MOUTH_MAX_AREA = 260  # 同 上限
+
+# 動かす部位の判定 (画面で色を塗って目視で決めた値)
+EYE_RADIUS_X = 30     # 瞳の中心からこの範囲を目とみなす (viewBox)
+EYE_RADIUS_Y = 26
+EYE_MAX_LUM = 195     # これより明るいものは肌や前髪なので目に含めない
+AHOGE_BAND = 53       # 最上端からこの範囲を
+AHOGE_HALF_W = 45     # 中心からこの幅にあれば アホ毛とみなす
 
 
 def disk(r):
@@ -313,7 +322,7 @@ def analyze_region(rgb, fg, cfg, box=None):
 
 
 # ------------------------------------------------------------ 線画の抽出
-def extract_lines(rgb, fg):
+def extract_lines(rgb, fg, smooth=True):
     """
     原画は「線画 + 塗り」で描かれている。面だけを再現しても線が落ちるので、
     ここで線だけを取り出す。
@@ -321,16 +330,75 @@ def extract_lines(rgb, fg):
     black-hat (グレースケールの closing との差) は「周囲より暗い細い構造」に
     反応する。線幅より少し大きい構造要素を使うので、広い影には反応せず、
     髪の毛の流れやまつ毛のような線だけが残る。
+
+    smooth=False は口を拾うため。ぼかしは細かい枝を減らすのに効くが、口の
+    ように 5px しかない形は 1px まで削れて消えるので、そこだけ素のマスクを使う。
     """
     gray = rgb.mean(axis=2)
     black_hat = ndimage.grey_closing(gray, footprint=disk(LINE_SCALE)) - gray
     lines = fg & (black_hat > LINE_THRESH)
     # 1px のごま塩を落とす。線そのものは細いので opening は最小限に
     lines = ndimage.binary_opening(lines, disk(1))
-    # 細いマスクの輪郭はそのままだと往復して棘だらけになる。閾値 0.5 の
-    # ガウシアンで角を落とす (太さは変えない)。
-    lines = ndimage.gaussian_filter(lines.astype(np.float32), LINE_SMOOTH) > 0.5
+    if smooth and LINE_SMOOTH > 0:
+        lines = ndimage.gaussian_filter(lines.astype(np.float32), LINE_SMOOTH) > 0.5
     return lines
+
+
+def face_features(rgb, fg, lines, scale, offset, w, h, depth_base):
+    """
+    顔の中の小さな特徴 — このイラストでは口 — を個別に拾う。
+
+    原画の口は 5px ほどの「へ」の字が 2 つあるだけで、面パスの足切りにも
+    ストロークの最小長にもかからない。表情を動かすには要るので、顔の位置を
+    肌の色から割り出し、その下寄り中央にある線マスクの小塊だけを取り出す。
+    """
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    skin = fg & (r > 212) & ((r - b) > 16) & ((r - b) < 70) & (g > 186)
+    skin = ndimage.binary_opening(skin, disk(4))
+    skin = ndimage.binary_fill_holes(skin)
+    lab, n = ndimage.label(skin)
+    if n == 0:
+        return []
+    sizes = ndimage.sum(skin, lab, range(1, n + 1))
+    face = lab == int(np.argmax(sizes)) + 1
+    ys, xs = np.nonzero(face)
+    y0, x0 = ys.min(), xs.min()
+    fh, fw = ys.max() - y0, xs.max() - x0
+
+    # 顔の下寄り中央だけを見る。目やまつ毛を巻き込まないための窓
+    box = (y0 + int(fh * 0.55), y0 + int(fh * 0.92),
+           x0 + int(fw * 0.25), x0 + int(fw * 0.75))
+    region = np.zeros_like(lines)
+    region[box[0]:box[1], box[2]:box[3]] = lines[box[0]:box[1], box[2]:box[3]]
+
+    llab, ln = ndimage.label(region, structure=np.ones((3, 3)))
+    out = []
+    for idx in range(1, ln + 1):
+        mask = llab == idx
+        area = int(mask.sum())
+        if not (MOUTH_MIN_AREA <= area <= MOUTH_MAX_AREA):
+            continue
+        cons = contours_of(mask, min_area=1.0)
+        ds = []
+        for pts in cons:
+            simp = rdp_closed(pts, 0.3)
+            if len(simp) >= 3:
+                ds.append(to_bezier(simp, scale, offset))
+        if not ds:
+            continue
+        cy, cx = ndimage.center_of_mass(mask)
+        col = rgb[mask].mean(axis=0)
+        out.append({
+            "id": f"m{idx:02d}",
+            "label": "mouth",
+            "fill": "#%02x%02x%02x" % tuple(int(round(c)) for c in col),
+            "depth": depth_base + idx,
+            "area": round(area * scale * scale, 1),
+            "cx": round(float(cx) * scale + offset[0], 1),
+            "cy": round(float(cy) * scale + offset[1], 1),
+            "d": " ".join(ds),
+        })
+    return out
 
 
 def stroke_shapes(rgb, lines, scale, offset, w, h, depth_base):
@@ -444,7 +512,7 @@ def split_subpaths(path):
     return [s for s in segs if len(s) >= 3]
 
 
-def contours_of(mask):
+def contours_of(mask, min_area=MIN_HOLE_AREA):
     """marching squares でマスクの輪郭(外周 + 穴)を取り出す。"""
     padded = np.pad(mask.astype(float), 1)
     fig = plt.figure()
@@ -458,7 +526,7 @@ def contours_of(mask):
                 if len(v) < 8:
                     continue
                 pts = np.column_stack([v[:, 0] - 1.0, v[:, 1] - 1.0])
-                if polygon_area(pts) < MIN_HOLE_AREA:
+                if polygon_area(pts) < min_area:
                     continue
                 paths.append(pts)
         return paths
@@ -661,6 +729,44 @@ def to_shape(part, index, rgb, scale, offset, w, h, cfg):
     return entry
 
 
+def assign_animation_parts(out):
+    """
+    動かす部位のラベルを付け直す。
+
+    色から推測した guess_label は面の分類には足りるが、部位としては当てに
+    ならない (前髪と肌が同じ "hair" に入るなど)。ここでは瞳の位置を基準に
+    目・アホ毛を取り直す。画面で色を塗って目視で確かめた条件をそのまま置いた。
+    """
+    iris = [s for s in out if s["label"] == "iris"]
+    if not iris:
+        return out
+    ex = sorted(s["cx"] for s in iris)
+    ey = sum(s["cy"] for s in iris) / len(iris)
+    left = sum(x for x in ex if x < sum(ex) / len(ex))
+    left /= max(1, sum(1 for x in ex if x < sum(ex) / len(ex)))
+    right = sum(x for x in ex if x >= sum(ex) / len(ex))
+    right /= max(1, sum(1 for x in ex if x >= sum(ex) / len(ex)))
+
+    def luminance(s):
+        c = (s.get("fill") or s.get("stroke") or "#000")[1:]
+        r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+        return 0.299 * r + 0.587 * g + 0.114 * b
+
+    top = min(s["cy"] for s in out)
+    cx_all = sum(s["cx"] for s in out) / len(out)
+
+    for s in out:
+        if s["label"] == "mouth":
+            continue
+        near_eye = (abs(s["cy"] - ey) < EYE_RADIUS_Y and
+                    min(abs(s["cx"] - left), abs(s["cx"] - right)) < EYE_RADIUS_X)
+        if near_eye and luminance(s) < EYE_MAX_LUM:
+            s["label"] = "eye"
+        elif s["cy"] < top + AHOGE_BAND and abs(s["cx"] - cx_all) < AHOGE_HALF_W:
+            s["label"] = "ahoge"
+    return out
+
+
 # ------------------------------------------------------------------ main
 def main():
     rgb, fg = load_rgba()
@@ -723,6 +829,14 @@ def main():
     strokes = stroke_shapes(rgb, lines, scale, offset, w, h, len(parts))
     out.extend(strokes)
     print(f"strokes: +{len(strokes)} (total {len(out)} shapes)")
+
+    # 口はぼかす前のマスクから拾う (ぼかすと 5px の形が消える)
+    mouth = face_features(rgb, fg, extract_lines(rgb, fg, smooth=False),
+                          scale, offset, w, h, len(parts) + len(strokes))
+    out.extend(mouth)
+    print(f"mouth: +{len(mouth)} (total {len(out)} shapes)")
+
+    out = assign_animation_parts(out)
 
     counts = {}
     for s in out:
