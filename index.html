@@ -19,6 +19,17 @@
       #stage { width: min(90vmin, 620px); aspect-ratio: 1 / 1; }
       #stage svg { width: 100%; height: 100%; display: block; }
       footer { padding: 10px 20px; font-size: 12px; color: #c0b6d0; }
+      #expressions { display: flex; gap: 8px; justify-content: center; padding: 4px 0 14px; }
+      #expressions button {
+        font: inherit; font-size: 13px; padding: 6px 16px; cursor: pointer;
+        border: 1px solid #ded6ea; border-radius: 999px;
+        background: #fff; color: #6b6180;
+      }
+      #expressions button.on { background: #ede6f7; border-color: #c3b3dd; color: #4a4066; }
+      @media (prefers-color-scheme: dark) {
+        #expressions button { background: #211d2b; border-color: #3a3348; color: #b7addd; }
+        #expressions button.on { background: #37304a; border-color: #574c72; color: #e6dffa; }
+      }
       @media (prefers-color-scheme: dark) {
         body { background: #14121a; color: #cfc6de; }
       }
@@ -29,6 +40,7 @@
     <main>
       <div id="stage"></div>
     </main>
+    <div id="expressions"></div>
     <footer><span id="info">assets/SD.png を写真を使わず JS だけで再現</span></footer>
     <!--
       解析をかけ直しても、ブラウザが古い shapes.js / main.js を握ったままだと

@@ -117,6 +117,11 @@ MOUTH_INNER_RATIO = 0.62   # 口内の縦横比
 MOUTH_INNER_COLOR = "#7d4a4c"   # 口内の色 (原画には無いので口紅寄りの暗赤)
 MOUTH_INNER_DROP = 0.85    # 口内を唇よりどれだけ下にずらすか (ry に対する比)
 
+# 笑い目の弧の形 (目の半幅に対する比)
+SMILE_W = 0.92
+SMILE_H = 0.30
+SMILE_STROKE = 0.13
+
 # 動かす部位の判定 (画面で色を塗って目視で決めた値)
 # 耳の位置 (顔の下地の bbox に対する比)。画面で塗って目視で合わせた
 EAR_DX = 0.79         # 顔の中心から左右へ、顔幅の何倍か
@@ -482,6 +487,53 @@ def build_mouth_inner(mouth, depth):
         "cy": round(cy, 2),
         "d": d,
     }
+
+
+def build_expressions(anchors, out, depth):
+    """
+    表情差分の追加パーツを作る。
+
+    原画は一つの表情しか持たないので、笑い目のような別の形はこちらで足す。
+    まつ毛の色を借りた弧を、目と同じ位置に置いておき、普段は隠しておく。
+    切り替えるときは元の目を消してこちらを出す。
+    """
+    if "eyeL" not in anchors:
+        return []
+
+    # 線の色はまつ毛から借りる。原画に無い形でも、色だけは絵から取る
+    lashes = [s for s in out
+              if s["label"] in ("eye", "eyeLine") and not s.get("stroke")]
+    if lashes:
+        def lum(s):
+            c = s["fill"][1:]
+            return int(c[0:2], 16) * 0.299 + int(c[2:4], 16) * 0.587 + int(c[4:6], 16) * 0.114
+        color = min(lashes, key=lum)["fill"]
+    else:
+        color = "#3a2f42"
+
+    half_w = anchors.get("eyeHalfW", 27)
+    entries = []
+    for side in ("eyeL", "eyeR"):
+        a = anchors[side]
+        cx, cy = a["cx"], a["cy"]
+        rx = half_w * SMILE_W
+        ry = half_w * SMILE_H
+        # 上に凸の弧。二次ベジェで十分な形
+        d = (f"M{cx - rx:.2f} {cy + ry:.2f}"
+             f"Q{cx:.2f} {cy - ry * 1.4:.2f} {cx + rx:.2f} {cy + ry:.2f}")
+        entries.append({
+            "id": f"smile-{side}",
+            "label": "smileEye",
+            "stroke": color,
+            "width": round(half_w * SMILE_STROKE, 2),
+            "depth": depth,
+            "area": round(rx * ry, 1),
+            "cx": round(cx, 2),
+            "cy": round(cy, 2),
+            "hidden": True,
+            "d": d,
+        })
+    return entries
 
 
 def face_features(rgb, fg, scale, offset, w, h, depth_base):
@@ -1042,6 +1094,13 @@ def main():
         face_box = (fys.min() * scale + offset[1], fys.max() * scale + offset[1],
                     fxs.min() * scale + offset[0], fxs.max() * scale + offset[0])
     out, anchors = assign_animation_parts(out, face_box)
+
+    # 表情差分。普段は隠れていて、切り替えたときだけ出る
+    if out:
+        smiles = build_expressions(anchors, out, max(s["depth"] for s in out) + 1)
+        out.extend(smiles)
+        if smiles:
+            print(f"expressions: +{len(smiles)}")
 
     # 顔の下地を、顔の上にあるパーツ全部より奥に差し込む
     facing = [s for s in out if s["label"] in ("eye", "mouth")]

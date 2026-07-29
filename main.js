@@ -56,6 +56,7 @@ function build() {
         "stroke-linejoin": "round",
       };
       if (s.opacity !== undefined) attrs.opacity = s.opacity;
+      if (s.hidden) attrs.display = "none";
       svg.appendChild(el("path", attrs));
       continue;
     }
@@ -174,6 +175,60 @@ function groupEyes(svg) {
   }).filter(Boolean);
 }
 
+// -------------------------------------------------------------- 表情差分
+// 原画は一つの表情しか持たないので、差分は「元の目を隠して別の形を出す」
+// という足し引きで作る。
+const EXPRESSIONS = {
+  normal: { hide: [], show: [], blink: true },
+  smile: { hide: ["eye"], show: ["smileEye"], blink: false },
+  wide: { hide: [], show: [], blink: false, eyeScale: 1.18 },
+};
+
+let currentExpression = "normal";
+
+function applyExpression(svg, name) {
+  const spec = EXPRESSIONS[name];
+  if (!spec) return;
+  currentExpression = name;
+
+  // 表示の切り替えは display 属性で行う。build() が隠すときも属性を使って
+  // いるので、style 側だけ空にしても属性の display="none" が残って出てこない。
+  const setShown = (label, shown) => {
+    for (const n of svg.querySelectorAll(`[data-label="${label}"]`)) {
+      if (shown) n.removeAttribute("display");
+      else n.setAttribute("display", "none");
+    }
+  };
+
+  for (const ex of Object.values(EXPRESSIONS)) {
+    for (const label of ex.show) setShown(label, false);
+  }
+  for (const label of spec.show) setShown(label, true);
+
+  const hidden = new Set(spec.hide);
+  for (const label of ["eye"]) setShown(label, !hidden.has(label));
+}
+
+function buildExpressionUI(svg) {
+  const host = document.getElementById("expressions");
+  if (!host) return;
+  const names = Object.keys(EXPRESSIONS).filter(
+    (n) => n === "normal" || svg.querySelector(`[data-label="${EXPRESSIONS[n].show[0]}"]`) || !EXPRESSIONS[n].show.length
+  );
+  const labels = { normal: "ふつう", smile: "笑顔", wide: "びっくり" };
+  for (const n of names) {
+    const b = document.createElement("button");
+    b.textContent = labels[n] || n;
+    b.dataset.expr = n;
+    b.className = n === currentExpression ? "on" : "";
+    b.addEventListener("click", () => {
+      applyExpression(svg, n);
+      for (const other of host.children) other.className = other.dataset.expr === n ? "on" : "";
+    });
+    host.appendChild(b);
+  }
+}
+
 // ------------------------------------------------------------ アニメーション
 function animate(svg) {
   const eyes = groupEyes(svg);
@@ -188,12 +243,8 @@ function animate(svg) {
   // 口内は上端を軸に開かせたいので、潰す前の外形から上端を取っておく
   const innerTop = inner ? inner.getBBox().y : 0;
 
-  // 耳ごとの、次にぴくつく時刻と向き
-  const twitch = ears.map((_, i) => ({
-    next: 1.5 + i * 0.9 + Math.random() * 2,
-    start: -1,
-    dir: i === 0 ? -1 : 1,
-  }));
+  // 次に耳がぴくつく時刻。左右で共有する
+  const twitch = { next: 1.5 + Math.random() * 2, start: -1 };
 
   // まばたきは「たまに、素早く」。等間隔だと機械的に見える
   let nextBlink = 1.2;
@@ -204,7 +255,8 @@ function animate(svg) {
   function frame(now) {
     const t = (now - t0) / 1000;
 
-    if (t > nextBlink && blinkStart < 0) blinkStart = t;
+    const expr = EXPRESSIONS[currentExpression] || EXPRESSIONS.normal;
+    if (expr.blink && t > nextBlink && blinkStart < 0) blinkStart = t;
     let lid = 1;
     if (blinkStart >= 0) {
       const p = (t - blinkStart) / BLINK;
@@ -217,10 +269,11 @@ function animate(svg) {
         lid = p < 0.45 ? 1 - p / 0.45 : (p - 0.45) / 0.55;
       }
     }
+    const eyeScale = expr.eyeScale || 1;
     for (const g of eyes) {
       const [cx, cy] = at(g);
       g.setAttribute("transform",
-        `translate(${cx} ${cy}) scale(1 ${Math.max(0.02, lid)}) translate(${-cx} ${-cy})`);
+        `translate(${cx} ${cy}) scale(${eyeScale} ${Math.max(0.02, lid) * eyeScale}) translate(${-cx} ${-cy})`);
     }
 
     // 口の開き具合。0 = 閉じ、1 = 全開
@@ -247,22 +300,23 @@ function animate(svg) {
       inner.setAttribute("opacity", h < 0.04 ? 0 : 1);
     }
 
-    // 耳。ときどき片方だけぴくっと動く。左右そろえると作り物めいて見える
+    // 耳は左右そろえてぴくっと動かす
+    if (t > twitch.next) {
+      twitch.start = t;
+      twitch.next = t + 2.5 + Math.random() * 5;
+    }
+    let earAngle = 0;
+    if (twitch.start >= 0) {
+      const p = (t - twitch.start) / EAR_TWITCH;
+      if (p >= 1) twitch.start = -1;
+      // 一度はねて戻る。減衰する振動
+      else earAngle = Math.sin(p * Math.PI * 2.4) * (1 - p) * EAR_TWITCH_DEG;
+    }
     for (let i = 0; i < ears.length; i++) {
       const g = ears[i];
       const [cx, cy] = at(g);
-      const tw = twitch[i];
-      if (t > tw.next) {
-        tw.start = t;
-        tw.next = t + 2.5 + Math.random() * 5;
-      }
-      let a = 0;
-      if (tw.start >= 0) {
-        const p = (t - tw.start) / EAR_TWITCH;
-        if (p >= 1) tw.start = -1;
-        // 一度はねて戻る。減衰する振動
-        else a = Math.sin(p * Math.PI * 2.4) * (1 - p) * EAR_TWITCH_DEG * tw.dir;
-      }
+      // 左右は鏡写しに振る。同じ向きに回すと頭ごと傾いたように見える
+      const a = earAngle * (i === 0 ? -1 : 1);
       // 軸は耳の根元 (下端寄り)。重心で回すと耳が浮いて見える
       g.setAttribute("transform", `rotate(${a} ${cx} ${cy + EAR_PIVOT_DROP})`);
     }
@@ -285,6 +339,7 @@ function render() {
   stage.innerHTML = "";
   const svg = build();
   stage.appendChild(svg);
+  buildExpressionUI(svg);
   animate(svg);
   reportStats();
 }
